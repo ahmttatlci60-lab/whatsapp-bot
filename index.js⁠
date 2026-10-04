@@ -1,0 +1,130 @@
+const { Client, LocalAuth } = require('whatsapp-web.js');
+const QRCode = require('qrcode');
+
+// ================= YAPILANDIRMA =================
+// Kendi telefon numaranı ülke koduyla yaz (Örn: 905321234567@c.us)
+const YONETICI_NUMARASI = '905XXXXXXXXX@c.us'; 
+const GONDERIM_ARALIGI = 5000; // Gruplar arası 5 saniye
+// =================================================
+
+const client = new Client({
+    authStrategy: new LocalAuth(),
+    puppeteer: {
+        headless: true,
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--single-process',
+            '--disable-gpu'
+        ]
+    }
+});
+
+let isDagitimiAktif = false;
+let mevcutIsMetni = "";
+let hedefGruplar = [];
+let mevcutGrupIndex = 0;
+let dagitimTimer = null;
+
+client.on('qr', (qr) => {
+    console.log("\n=== QR KODU AŞAĞIDAKİ LINKTEN TARATIN ===\n");
+    console.log(`https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(qr)}`);
+    console.log("\n=========================================\n");
+});
+
+client.on('ready', () => {
+    console.log('✅ Bot başarıyla WhatsApp\'a bağlandı ve hazır!');
+});
+
+client.on('message', async (msg) => {
+    const mesajMetni = msg.body.trim();
+    const mesajUpper = mesajMetni.toUpperCase();
+    const chat = await msg.getChat();
+
+    // 1. İŞ BAŞLATMA (!is mesajı)
+    if (msg.from === YONETICI_NUMARASI && mesajMetni.startsWith('!is ')) {
+        if (isDagitimiAktif) {
+            await msg.reply('⚠️ Zaten devam eden bir iş var! Durdurmak için `!dur` yazın.');
+            return;
+        }
+
+        mevcutIsMetni = mesajMetni.replace('!is ', '').trim();
+        const hepsi = await client.getChats();
+        hedefGruplar = hepsi.filter(c => c.isGroup);
+
+        if (hedefGruplar.length === 0) {
+            await msg.reply('❌ Botun ekli olduğu grup bulunamadı!');
+            return;
+        }
+
+        isDagitimiAktif = true;
+        mevcutGrupIndex = 0;
+
+        await msg.reply(`🚀 İş dağıtımı başladı!\nToplam Grup: ${hedefGruplar.length}\nİş: "${mevcutIsMetni}"`);
+        isDagitiminiSürdur();
+        return;
+    }
+
+    // 2. MANUEL DURDURMA (!dur)
+    if (msg.from === YONETICI_NUMARASI && mesajMetni === '!dur') {
+        durudurIsDagitimi();
+        await msg.reply('🛑 İş dağıtımı durduruldu.');
+        return;
+    }
+
+    // 3. GRUPTAN "V" YAZILDIĞINDA
+    if (isDagitimiAktif && chat.isGroup && (mesajUpper === 'V' || mesajUpper === 'V.')) {
+        durudurIsDagitimi();
+
+        const alanKisiContact = await msg.getContact();
+        const alanKisiNumara = alanKisiContact.number || msg.author.split('@')[0];
+        const alanKisiIsim = alanKisiContact.pushname || alanKisiContact.name || 'Bilinmiyor';
+
+        const bildirimMesaji = `🎉 *İŞ ALINDI!*\n\n` +
+            `📍 *Grup:* ${chat.name}\n` +
+            `👤 *Alan:* ${alanKisiIsim} (+${alanKisiNumara})\n` +
+            `📝 *İş:* ${mevcutIsMetni}\n\n` +
+            `🛑 *İş dağıtımı durduruldu.*`;
+
+        await client.sendMessage(YONETICI_NUMARASI, bildirimMesaji);
+        await msg.reply('✅ İş tarafınıza tanımlandı.');
+    }
+});
+
+function isDagitiminiSürdur() {
+    if (!isDagitimiAktif) return;
+
+    if (mevcutGrupIndex >= hedefGruplar.length) {
+        client.sendMessage(YONETICI_NUMARASI, 'ℹ️ Tüm gruplara atıldı ancak kimseden "V" gelmedi.');
+        durudurIsDagitimi();
+        return;
+    }
+
+    const hedefGrup = hedefGruplar[mevcutGrupIndex];
+
+    hedefGrup.sendMessage(`📋 *YENİ İŞ BİLDİRİMİ*\n\n${mevcutIsMetni}\n\n👉 *Almak için "V" yazınız.*`)
+        .then(() => {
+            console.log(`Gönderildi [${mevcutGrupIndex + 1}/${hedefGruplar.length}] -> ${hedefGrup.name}`);
+            mevcutGrupIndex++;
+            dagitimTimer = setTimeout(() => { isDagitiminiSürdur(); }, GONDERIM_ARALIGI);
+        })
+        .catch(err => {
+            console.error(`Hata (${hedefGrup.name}):`, err);
+            mevcutGrupIndex++;
+            isDagitiminiSürdur();
+        });
+}
+
+function durudurIsDagitimi() {
+    isDagitimiAktif = false;
+    if (dagitimTimer) {
+        clearTimeout(dagitimTimer);
+        dagitimTimer = null;
+    }
+}
+
+client.initialize();
